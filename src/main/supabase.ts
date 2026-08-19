@@ -204,14 +204,19 @@ export async function createUploadToken(
   if (!c) return null
   const token = randomUUID()
   const now = Date.now()
-  const { error } = await c.from('upload_tokens').insert({
-    token,
-    telegram_id: telegramId,
-    created_at: now,
-    expires_at: now + ttlMinutes * 60 * 1000
-  })
-  if (error) {
-    console.warn('[supabase] createUploadToken failed:', error.message)
+  try {
+    const { error } = await c.from('upload_tokens').insert({
+      token,
+      telegram_id: telegramId,
+      created_at: now,
+      expires_at: now + ttlMinutes * 60 * 1000
+    })
+    if (error) {
+      console.warn('[supabase] createUploadToken failed:', error.message)
+      return null
+    }
+  } catch (err) {
+    console.warn('[supabase] createUploadToken threw:', err instanceof Error ? err.message : err)
     return null
   }
   return token
