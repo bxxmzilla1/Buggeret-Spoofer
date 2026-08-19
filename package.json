@@ -1,0 +1,42 @@
+{
+  "name": "bugrette-spoofer",
+  "version": "1.0.0",
+  "description": "Bugrette Spoofer — a Telegram bot that spoofs images & videos, gated by a $200/month crypto subscription (NowPayments), running 24/7 inside an Electron app.",
+  "main": "./out/main/index.js",
+  "author": "Bugrette",
+  "license": "MIT",
+  "scripts": {
+    "dev": "electron-vite dev --watch",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite preview",
+    "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
+    "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
+    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "make-icons": "node scripts/make-icons.mjs",
+    "dist": "electron-vite build && electron-builder",
+    "dist:win": "electron-vite build && electron-builder --win"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
+    "electron-store": "^8.2.0",
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0",
+    "piexifjs": "^1.0.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.3.0",
+    "jimp": "^1.6.1",
+    "png2icons": "^2.0.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1"
+  }
+}

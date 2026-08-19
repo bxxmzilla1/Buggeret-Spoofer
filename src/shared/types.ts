@@ -1,0 +1,162 @@
+// Types shared across the main process, preload bridge and renderer UI.
+
+export const APP_NAME = 'Bugrette Spoofer'
+
+/** A Telegram admin the license owner has authorised to use the spoofer. */
+export interface AdminEntry {
+  /** Lowercased Telegram @username (without the @). */
+  username: string
+  /** Bound the first time this admin messages the bot. */
+  telegramId?: number
+}
+
+export type LicenseStatus = 'unpaid' | 'paid' | 'active' | 'expired' | 'revoked'
+
+/** A single monthly subscription. Created when a crypto payment is confirmed. */
+export interface License {
+  key: string
+  status: LicenseStatus
+  createdAt: number
+  /** Set when the buyer activates the key against their Telegram account. */
+  activatedAt?: number
+  /** activatedAt + subscriptionDays. */
+  expiresAt?: number
+  ownerTelegramId?: number
+  ownerUsername?: string
+  /** Up to `maxAdmins` authorised users. */
+  admins: AdminEntry[]
+  /** NowPayments payment id that funded this license (if any). */
+  paymentId?: string
+  payCurrency?: string
+}
+
+/** A crypto payment awaiting confirmation from NowPayments. */
+export interface PendingPayment {
+  paymentId: string
+  telegramId: number
+  username?: string
+  payCurrency: string
+  payAddress: string
+  payAmount: number
+  priceUsd: number
+  /** License key pre-generated for this payment; issued once it confirms. */
+  key: string
+  status: string
+  createdAt: number
+  updatedAt: number
+}
+
+/** The bot's public runtime status, surfaced in the dashboard. */
+export type BotState = 'idle' | 'ok' | 'error' | 'bad-token' | 'conflict'
+export interface BotStatus {
+  state: BotState
+  message?: string
+  username?: string
+}
+
+/** Full config as stored on disk (main process only). */
+export interface BotConfig {
+  botToken: string
+  nowPaymentsApiKey: string
+  ipnSecret: string
+  /** Supabase project URL — users (license owners) & admins are stored there. */
+  supabaseUrl: string
+  /** Supabase service_role key (kept only in the main process). */
+  supabaseKey: string
+  outputFolder: string
+  spooferEnabled: boolean
+  spooferMetaOnly: boolean
+  priceUsd: number
+  subscriptionDays: number
+  maxAdmins: number
+  /** Coins offered on the crypto payment menu (NowPayments pay_currency codes). */
+  payCurrencies: string[]
+  /** Web bulk-upload intake (Supabase Storage broker). */
+  webIntakeEnabled: boolean
+  /** Public URL where the upload page is hosted (used by the bot's link). */
+  uploadPageUrl: string
+  /** Hours a finished job's files are kept before auto-deletion from storage. */
+  jobRetentionHours: number
+  /** Max upload size per file (MB) advertised to the web page. */
+  maxUploadMb: number
+  licenses: Record<string, License>
+  pendingPayments: Record<string, PendingPayment>
+  lastUpdateId: number
+}
+
+/** Config as exposed to the renderer — secrets are masked to booleans. */
+export interface PublicConfig {
+  hasBotToken: boolean
+  hasNowPaymentsKey: boolean
+  hasIpnSecret: boolean
+  supabaseUrl: string
+  hasSupabaseKey: boolean
+  outputFolder: string
+  spooferEnabled: boolean
+  spooferMetaOnly: boolean
+  priceUsd: number
+  subscriptionDays: number
+  maxAdmins: number
+  payCurrencies: string[]
+  webIntakeEnabled: boolean
+  uploadPageUrl: string
+  jobRetentionHours: number
+  maxUploadMb: number
+}
+
+export interface ConfigPatch {
+  botToken?: string
+  nowPaymentsApiKey?: string
+  ipnSecret?: string
+  supabaseUrl?: string
+  supabaseKey?: string
+  outputFolder?: string
+  spooferEnabled?: boolean
+  spooferMetaOnly?: boolean
+  priceUsd?: number
+  subscriptionDays?: number
+  maxAdmins?: number
+  payCurrencies?: string[]
+  webIntakeEnabled?: boolean
+  uploadPageUrl?: string
+  jobRetentionHours?: number
+  maxUploadMb?: number
+}
+
+/** A license row rendered in the dashboard (owner + admins + expiry). */
+export interface LicenseView extends License {
+  daysLeft: number | null
+}
+
+export interface DashboardData {
+  config: PublicConfig
+  status: BotStatus
+  licenses: LicenseView[]
+  pending: PendingPayment[]
+}
+
+// IPC channel names — single source of truth for main ⇄ preload ⇄ renderer.
+export const IPC = {
+  getConfig: 'config:get',
+  saveConfig: 'config:save',
+  getDashboard: 'dashboard:get',
+  pickFolder: 'dialog:pickFolder',
+  createLicense: 'license:create',
+  revokeLicense: 'license:revoke',
+  restartBot: 'bot:restart',
+  openExternal: 'shell:openExternal',
+  evDashboard: 'ev:dashboard'
+} as const
+
+/** The typed API exposed on `window.api` by the preload script. */
+export interface BugretteApi {
+  getConfig: () => Promise<PublicConfig>
+  saveConfig: (patch: ConfigPatch) => Promise<PublicConfig>
+  getDashboard: () => Promise<DashboardData>
+  pickFolder: () => Promise<string | null>
+  createLicense: (days?: number) => Promise<LicenseView>
+  revokeLicense: (key: string) => Promise<void>
+  restartBot: () => Promise<void>
+  openExternal: (url: string) => Promise<void>
+  onDashboard: (cb: (data: DashboardData) => void) => () => void
+}

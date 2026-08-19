@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bugrette Spoofer — Bulk Upload</title>
+    <style>
+      :root {
+        --bg: #08060d;
+        --panel: rgba(23, 16, 38, 0.72);
+        --border: rgba(150, 90, 255, 0.25);
+        --accent: #a05bff;
+        --accent-2: #6c2bd9;
+        --text: #ece7f7;
+        --muted: #9c93b3;
+        --ok: #34d399;
+        --err: #f87171;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        color: var(--text);
+        background:
+          radial-gradient(1000px 600px at 15% -10%, rgba(120, 60, 220, 0.22), transparent 60%),
+          radial-gradient(900px 600px at 110% 10%, rgba(90, 40, 200, 0.18), transparent 55%),
+          var(--bg);
+        display: flex;
+        justify-content: center;
+        padding: 40px 16px;
+      }
+      .wrap { width: 100%; max-width: 720px; }
+      .brand { display: flex; align-items: center; gap: 14px; margin-bottom: 22px; }
+      .brand .dot {
+        width: 46px; height: 46px; border-radius: 13px;
+        background: linear-gradient(145deg, var(--accent), var(--accent-2));
+        display: grid; place-items: center; font-size: 24px;
+        box-shadow: 0 0 30px rgba(160, 91, 255, 0.5);
+      }
+      h1 { font-size: 22px; margin: 0; }
+      .sub { color: var(--muted); font-size: 13px; margin: 2px 0 0; }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 22px;
+        backdrop-filter: blur(12px);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+      }
+      label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+      input[type='text'] {
+        width: 100%; padding: 12px 14px; border-radius: 11px;
+        border: 1px solid var(--border); background: rgba(0, 0, 0, 0.3);
+        color: var(--text); font-size: 15px; outline: none;
+      }
+      input[type='text']:focus { border-color: var(--accent); }
+      .drop {
+        margin-top: 18px; border: 2px dashed var(--border); border-radius: 16px;
+        padding: 34px 18px; text-align: center; cursor: pointer;
+        transition: border-color 0.15s, background 0.15s;
+      }
+      .drop.hover { border-color: var(--accent); background: rgba(160, 91, 255, 0.08); }
+      .drop .big { font-size: 16px; }
+      .drop .hint { color: var(--muted); font-size: 13px; margin-top: 6px; }
+      .files { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+      .file {
+        display: flex; align-items: center; gap: 10px; font-size: 14px;
+        background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border);
+        border-radius: 11px; padding: 10px 12px;
+      }
+      .file .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .file .size { color: var(--muted); font-size: 12px; }
+      .file .state { font-size: 12px; }
+      .file .state.ok { color: var(--ok); }
+      .file .state.err { color: var(--err); }
+      .file a { color: var(--accent); text-decoration: none; font-size: 13px; }
+      .file a:hover { text-decoration: underline; }
+      button.go {
+        margin-top: 18px; width: 100%; padding: 14px; border: none; cursor: pointer;
+        border-radius: 12px; font-size: 16px; font-weight: 600; color: white;
+        background: linear-gradient(145deg, var(--accent), var(--accent-2));
+        box-shadow: 0 10px 30px rgba(108, 43, 217, 0.45);
+      }
+      button.go:disabled { opacity: 0.5; cursor: not-allowed; }
+      .msg { margin-top: 14px; font-size: 14px; }
+      .msg.ok { color: var(--ok); }
+      .msg.err { color: var(--err); }
+      .foot { text-align: center; color: var(--muted); font-size: 12px; margin-top: 18px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="brand">
+        <div class="dot">🐞</div>
+        <div>
+          <h1>Bugrette Spoofer — Bulk Upload</h1>
+          <p class="sub">Drop your images & videos, we spoof them, you download the results.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <label for="key">License key</label>
+        <input id="key" type="text" placeholder="BUGR-XXXX-XXXX-XXXX" autocomplete="off" />
+
+        <div id="drop" class="drop">
+          <div class="big">📁 Drop files here or click to browse</div>
+          <div class="hint" id="limit">Images & videos supported</div>
+          <input id="picker" type="file" multiple accept="image/*,video/*" hidden />
+        </div>
+
+        <div id="files" class="files"></div>
+
+        <button id="go" class="go" disabled>Spoof my files</button>
+        <div id="msg" class="msg"></div>
+      </div>
+
+      <p class="foot">Files auto-delete after processing. Download links are time-limited.</p>
+    </div>
+
+    <script type="module">
+      import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+
+      // ─────────────────────────────────────────────────────────────────────
+      // CONFIG — fill these in with YOUR project's values before hosting.
+      //   • SUPABASE_URL:  Project Settings → API → Project URL
+      //   • SUPABASE_ANON_KEY:  Project Settings → API → anon public key
+      // The anon key is SAFE to expose in a public page. NEVER put the
+      // service_role key here.
+      // ─────────────────────────────────────────────────────────────────────
+      const SUPABASE_URL = 'https://vujacxvysogtuyoumycw.supabase.co'
+      const SUPABASE_ANON_KEY =
+        'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ1amFjeHZ5c29ndHV5b3VteWN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcxMjM4NDQsImV4cCI6MjEwMjY5OTg0NH0.0-WkER49S5R-cXvr67nqiPi8vnoSUak2Gx-DqdEHvMo'
+      const MAX_UPLOAD_MB = 200 // keep in sync with the desktop app's setting
+
+      const UPLOAD_BUCKET = 'spoof-uploads'
+      const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+
+      const $ = (id) => document.getElementById(id)
+      const keyInput = $('key')
+      const drop = $('drop')
+      const picker = $('picker')
+      const filesEl = $('files')
+      const goBtn = $('go')
+      const msg = $('msg')
+      $('limit').textContent = `Images & videos · up to ${MAX_UPLOAD_MB} MB each`
+
+      // Prefill the license key from the bot link (#key=...).
+      const hashKey = new URLSearchParams(location.hash.slice(1)).get('key')
+      if (hashKey) keyInput.value = hashKey
+
+      let chosen = []
+
+      function fmtSize(n) {
+        if (n > 1e9) return (n / 1e9).toFixed(1) + ' GB'
+        if (n > 1e6) return (n / 1e6).toFixed(1) + ' MB'
+        if (n > 1e3) return (n / 1e3).toFixed(0) + ' KB'
+        return n + ' B'
+      }
+
+      function render() {
+        filesEl.innerHTML = ''
+        chosen.forEach((f, i) => {
+          const row = document.createElement('div')
+          row.className = 'file'
+          row.innerHTML =
+            `<span class="name">${f.file.name}</span>` +
+            `<span class="size">${fmtSize(f.file.size)}</span>` +
+            `<span class="state ${f.stateClass || ''}" id="st-${i}">${f.state || ''}</span>`
+          filesEl.appendChild(row)
+        })
+        goBtn.disabled = chosen.length === 0
+      }
+
+      function addFiles(list) {
+        for (const file of list) {
+          if (file.size > MAX_UPLOAD_MB * 1e6) {
+            setMsg(`"${file.name}" exceeds ${MAX_UPLOAD_MB} MB and was skipped.`, 'err')
+            continue
+          }
+          chosen.push({ file, state: 'ready', stateClass: '' })
+        }
+        render()
+      }
+
+      function setMsg(text, cls) {
+        msg.textContent = text
+        msg.className = 'msg ' + (cls || '')
+      }
+
+      drop.addEventListener('click', () => picker.click())
+      picker.addEventListener('change', (e) => addFiles(e.target.files))
+      ;['dragenter', 'dragover'].forEach((ev) =>
+        drop.addEventListener(ev, (e) => {
+          e.preventDefault()
+          drop.classList.add('hover')
+        })
+      )
+      ;['dragleave', 'drop'].forEach((ev) =>
+        drop.addEventListener(ev, (e) => {
+          e.preventDefault()
+          drop.classList.remove('hover')
+        })
+      )
+      drop.addEventListener('drop', (e) => addFiles(e.dataTransfer.files))
+
+      goBtn.addEventListener('click', submit)
+
+      async function submit() {
+        const key = keyInput.value.trim()
+        if (!key) return setMsg('Enter your license key first.', 'err')
+        if (!chosen.length) return setMsg('Add at least one file.', 'err')
+
+        goBtn.disabled = true
+        setMsg('Checking your license…', '')
+
+        // Validate the license via the security-definer RPC (no table access).
+        const { data: active, error: rpcErr } = await supabase.rpc('is_license_active', { k: key })
+        if (rpcErr) {
+          goBtn.disabled = false
+          return setMsg('Could not reach the server. Try again.', 'err')
+        }
+        if (!active) {
+          goBtn.disabled = false
+          return setMsg('That license key is not active. Check it and try again.', 'err')
+        }
+
+        const jobId = crypto.randomUUID()
+
+        // Upload every file to spoof-uploads/<jobId>/<name>.
+        for (let i = 0; i < chosen.length; i++) {
+          const { file } = chosen[i]
+          const st = $('st-' + i)
+          st.textContent = 'uploading…'
+          st.className = 'state'
+          const { error } = await supabase.storage
+            .from(UPLOAD_BUCKET)
+            .upload(`${jobId}/${file.name}`, file, { upsert: true })
+          if (error) {
+            st.textContent = 'failed'
+            st.className = 'state err'
+            goBtn.disabled = false
+            return setMsg('Upload failed: ' + error.message, 'err')
+          }
+          st.textContent = 'uploaded'
+          st.className = 'state ok'
+        }
+
+        // Create the job row (RLS enforces the license is active).
+        const now = Date.now()
+        const { error: insErr } = await supabase.from('spoof_jobs').insert({
+          job_id: jobId,
+          license_key: key,
+          status: 'queued',
+          total: chosen.length,
+          completed: 0,
+          files: chosen.map((c) => ({ name: c.file.name, size: c.file.size, status: 'pending' })),
+          created_at: now,
+          updated_at: now
+        })
+        if (insErr) {
+          goBtn.disabled = false
+          return setMsg('Could not queue the job: ' + insErr.message, 'err')
+        }
+
+        setMsg('Queued! Spoofing in progress — links will appear below.', 'ok')
+        pollJob(jobId)
+      }
+
+      async function pollJob(jobId) {
+        const tick = async () => {
+          const { data, error } = await supabase
+            .from('spoof_jobs')
+            .select('status, completed, total, files, error')
+            .eq('job_id', jobId)
+            .single()
+          if (error || !data) return setTimeout(tick, 4000)
+
+          data.files.forEach((f, i) => {
+            const st = $('st-' + i)
+            if (!st) return
+            if (f.status === 'done' && f.downloadUrl) {
+              st.innerHTML = `<a href="${f.downloadUrl}" target="_blank" rel="noopener">download ↓</a>`
+              st.className = 'state ok'
+            } else if (f.status === 'error') {
+              st.textContent = 'failed'
+              st.className = 'state err'
+            } else if (data.status === 'processing') {
+              st.textContent = 'spoofing…'
+              st.className = 'state'
+            }
+          })
+
+          if (data.status === 'done') {
+            const ok = data.files.filter((f) => f.status === 'done').length
+            setMsg(`Done — ${ok}/${data.total} files ready. Tap “download” next to each file.`, 'ok')
+            return
+          }
+          if (data.status === 'error') {
+            setMsg('Processing error: ' + (data.error || 'unknown'), 'err')
+            return
+          }
+          setTimeout(tick, 4000)
+        }
+        tick()
+      }
+    </script>
+  </body>
+</html>
