@@ -67,6 +67,7 @@ export default function App(): JSX.Element {
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState<number | null>(null)
   const [showSettings, setShowSettings] = useState(false)
+  const [newUser, setNewUser] = useState('')
 
   useEffect(() => {
     let mounted = true
@@ -135,11 +136,17 @@ export default function App(): JSX.Element {
   }
 
   async function genLicense(): Promise<void> {
-    await window.api.createLicense()
+    const u = newUser.trim().replace(/^@/, '')
+    if (!/^[a-zA-Z0-9_]{4,32}$/.test(u)) {
+      alert('Enter a valid Telegram username (4–32 characters: letters, numbers, underscore).')
+      return
+    }
+    await window.api.createLicense(u)
+    setNewUser('')
   }
 
   async function revoke(key: string): Promise<void> {
-    if (confirm(`Revoke license ${key}? This immediately disables the subscriber.`)) {
+    if (confirm(`Revoke license ${key}? This immediately disables the user.`)) {
       await window.api.revokeLicense(key)
     }
   }
@@ -197,19 +204,18 @@ export default function App(): JSX.Element {
       <div className="stats">
         <div className="stat">
           <span className="stat-num">{activeCount}</span>
-          <span className="stat-label">Active subscribers</span>
+          <span className="stat-label">Active users</span>
         </div>
         <div className="stat">
-          <span className="stat-num">{data.pending.length}</span>
-          <span className="stat-label">Pending payments</span>
+          <span className="stat-num">{data.licenses.length}</span>
+          <span className="stat-label">Total licenses</span>
         </div>
         <div className="stat">
-          <span className="stat-num">${cfg.priceUsd}</span>
-          <span className="stat-label">Price / {cfg.subscriptionDays}d</span>
+          <span className="stat-num">{cfg.subscriptionDays}d</span>
+          <span className="stat-label">License length</span>
         </div>
         <div className="stat">
           <span className={`stat-pill ${cfg.hasBotToken ? 'on' : 'off'}`}>Bot</span>
-          <span className={`stat-pill ${cfg.hasNowPaymentsKey ? 'on' : 'off'}`}>Payments</span>
           <span className={`stat-pill ${cfg.hasSupabaseKey ? 'on' : 'off'}`}>Database</span>
         </div>
       </div>
@@ -218,18 +224,32 @@ export default function App(): JSX.Element {
         <section className="card">
           <div className="card-head">
             <h2>Licenses</h2>
-            <button className="ghost" onClick={genLicense}>
-              + Generate free key
-            </button>
+            <div className="gen-license">
+              <span className="at">@</span>
+              <input
+                className="user-input"
+                placeholder="telegram_username"
+                value={newUser}
+                onChange={(e) => setNewUser(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void genLicense()
+                }}
+              />
+              <button className="primary" onClick={genLicense}>
+                + Assign license
+              </button>
+            </div>
           </div>
           {data.licenses.length === 0 ? (
-            <p className="empty">No licenses yet. They appear here after a subscriber pays.</p>
+            <p className="empty">
+              No licenses yet. Type a Telegram username above and assign a key — the user activates it in the bot.
+            </p>
           ) : (
             <div className="table">
               <div className="tr th">
                 <span>Key</span>
                 <span>Status</span>
-                <span>Owner</span>
+                <span>User</span>
                 <span>Admins</span>
                 <span>Days</span>
                 <span></span>
@@ -238,7 +258,13 @@ export default function App(): JSX.Element {
                 <div className="tr" key={l.key}>
                   <span className="mono">{l.key}</span>
                   <span className={`status ${l.status}`}>{l.status}</span>
-                  <span>{l.ownerUsername ? `@${l.ownerUsername}` : l.ownerTelegramId || '—'}</span>
+                  <span>
+                    {l.ownerUsername
+                      ? `@${l.ownerUsername}`
+                      : l.assignedUsername
+                        ? `@${l.assignedUsername}`
+                        : l.ownerTelegramId || '—'}
+                  </span>
                   <span>{l.admins.length}</span>
                   <span>{l.daysLeft ?? '—'}</span>
                   <span>
@@ -246,30 +272,6 @@ export default function App(): JSX.Element {
                       revoke
                     </button>
                   </span>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        <section className="card">
-          <h2>Pending payments</h2>
-          {data.pending.length === 0 ? (
-            <p className="empty">No pending crypto payments.</p>
-          ) : (
-            <div className="table">
-              <div className="tr th pending">
-                <span>User</span>
-                <span>Coin</span>
-                <span>Amount</span>
-                <span>Status</span>
-              </div>
-              {data.pending.map((p) => (
-                <div className="tr pending" key={p.paymentId}>
-                  <span>{p.username ? `@${p.username}` : p.telegramId}</span>
-                  <span className="mono">{p.payCurrency.toUpperCase()}</span>
-                  <span className="mono">{p.payAmount}</span>
-                  <span className="status">{p.status}</span>
                 </div>
               ))}
             </div>
@@ -312,21 +314,6 @@ export default function App(): JSX.Element {
 
               <div className="field">
                 <label>
-                  NowPayments API key{' '}
-                  <span className={cfg.hasNowPaymentsKey ? 'chip ok' : 'chip'}>
-                    {cfg.hasNowPaymentsKey ? 'configured' : 'not set'}
-                  </span>
-                </label>
-                <input
-                  type="password"
-                  placeholder={cfg.hasNowPaymentsKey ? '•••••••• (leave blank to keep)' : 'NowPayments dashboard → API key'}
-                  value={form.nowPaymentsApiKey}
-                  onChange={(e) => set('nowPaymentsApiKey', e.target.value)}
-                />
-              </div>
-
-              <div className="field">
-                <label>
                   Supabase URL{' '}
                   <span className={cfg.supabaseUrl ? 'chip ok' : 'chip'}>
                     {cfg.supabaseUrl ? 'set' : 'not set'}
@@ -356,15 +343,11 @@ export default function App(): JSX.Element {
                 />
               </div>
 
-              <h3 className="group-title">Subscription</h3>
+              <h3 className="group-title">Access</h3>
 
               <div className="row3">
                 <div className="field">
-                  <label>Price (USD/mo)</label>
-                  <input type="number" value={form.priceUsd} onChange={(e) => set('priceUsd', Number(e.target.value))} />
-                </div>
-                <div className="field">
-                  <label>Subscription days</label>
+                  <label>License length (days)</label>
                   <input
                     type="number"
                     value={form.subscriptionDays}
@@ -375,16 +358,6 @@ export default function App(): JSX.Element {
                   <label>Max admins</label>
                   <input type="number" value={form.maxAdmins} onChange={(e) => set('maxAdmins', Number(e.target.value))} />
                 </div>
-              </div>
-
-              <div className="field">
-                <label>Accepted coins (comma-separated NowPayments codes)</label>
-                <input
-                  type="text"
-                  value={form.payCurrencies}
-                  onChange={(e) => set('payCurrencies', e.target.value)}
-                  placeholder="btc, eth, usdttrc20, ltc, sol"
-                />
               </div>
 
               <h3 className="group-title">Spoofer</h3>

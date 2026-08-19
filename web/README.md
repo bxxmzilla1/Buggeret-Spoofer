@@ -1,7 +1,9 @@
 # Bugrette Spoofer — Bulk Upload page
 
-A single static page (`index.html`) where subscribers drop many images/videos to
-be spoofed by the 24/7 desktop app, then download the results. No build step.
+A single static page (`index.html`) opened via a **temporary link** (from the
+bot's "Bulk upload" button, `#t=<token>`). Users drop many images/videos to be
+spoofed by the 24/7 desktop app, then download the results. The link expires
+after 30 minutes. No build step, no login, no license key.
 
 It's already wired to the Supabase project:
 
@@ -28,5 +30,5 @@ In the desktop dashboard → **Settings → Web bulk upload**:
 ## Prerequisites
 
 Run [`../supabase/schema.sql`](../supabase/schema.sql) once in the Supabase SQL
-editor so the `spoof_jobs` table, the `spoof-uploads` / `spoof-outputs` buckets,
-and the anon RLS policies exist.
+editor so the `spoof_jobs` and `upload_tokens` tables, the `spoof-uploads` /
+`spoof-outputs` buckets, and the anon RLS policies exist.

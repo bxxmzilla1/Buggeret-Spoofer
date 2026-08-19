@@ -12,8 +12,8 @@ import {
   allPending,
   deleteLicense
 } from './store'
-import { getBotStatus, onBotStatus, restartBot, startBot, startPaymentPoller } from './bot'
-import { createPaidLicense } from './license'
+import { getBotStatus, onBotStatus, restartBot, startBot } from './bot'
+import { createAssignedLicense } from './license'
 import { initSupabase, reinitSupabase } from './supabase'
 import { startJobWorker } from './jobs'
 
@@ -98,8 +98,8 @@ function registerIpc(): void {
     return res.filePaths[0]
   })
 
-  ipcMain.handle(IPC.createLicense, (_e, days?: number): LicenseView => {
-    const license = createPaidLicense(days ? { days } : undefined)
+  ipcMain.handle(IPC.createLicense, (_e, username: string): LicenseView => {
+    const license = createAssignedLicense(username)
     pushDashboard()
     return toLicenseView(license)
   })
@@ -153,7 +153,6 @@ if (!gotLock) {
     void initSupabase().then(pushDashboard)
 
     startBot()
-    startPaymentPoller()
 
     // Web bulk-upload worker: claims queued jobs, spoofs, uploads results,
     // and auto-deletes storage. No-ops until web intake + Supabase are set.

@@ -2,7 +2,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { randomUUID } from 'node:crypto'
-import type { BotStatus, PendingPayment } from '@shared/types'
+import type { BotStatus } from '@shared/types'
 import { APP_NAME } from '@shared/types'
 import {
   answerCallback,
@@ -26,25 +26,16 @@ import {
   getLastUpdateId,
   setLastUpdateId,
   findAccessLicense,
-  findOwnedLicense,
-  upsertPending,
-  deletePending,
-  allPending
+  findOwnedLicense
 } from './store'
-import { activateLicense, addAdmin, createUnpaidLicense, markLicensePaid, removeAdmin } from './license'
-import {
-  createPayment,
-  getPaymentStatus,
-  isDead,
-  isPaid,
-  NowPaymentsError,
-  statusLabel
-} from './payments'
+import { activateLicense, addAdmin, removeAdmin } from './license'
+import { createUploadToken } from './supabase'
 import { isSpoofableExt, spoofToFolder } from './spoofer'
 
 // The Telegram bot for Bugrette Spoofer. One long-poll loop drives everything;
 // all user actions happen through inline-keyboard menus. Access to the spoofer
-// is gated behind an active subscription license (owner + up to 5 admins).
+// is gated behind a license key the operator issues and assigns to a specific
+// Telegram username (owner + up to `maxAdmins` admins).
 
 // ── Runtime status (surfaced to the dashboard) ───────────────────────────────
 let botStatus: BotStatus = { state: 'idle' }
@@ -87,11 +78,6 @@ function sleep(ms: number): Promise<void> {
 
 // ── Menus ────────────────────────────────────────────────────────────────────
 
-function priceLabel(): string {
-  const cfg = getConfig()
-  return `$${cfg.priceUsd}/month`
-}
-
 function mainMenuText(user: TgUser, access: ReturnType<typeof findAccessLicense>): string {
   const name = escapeHtml(user.first_name || user.username || 'there')
   if (access) {
@@ -106,8 +92,8 @@ function mainMenuText(user: TgUser, access: ReturnType<typeof findAccessLicense>
   return (
     `🐞 <b>${APP_NAME}</b>\n\n` +
     `Hi ${name}! I spoof images & videos so no two exports share a fingerprint.\n\n` +
-    `Access requires a subscription of <b>${priceLabel()}</b>, paid in crypto. ` +
-    `After payment you get a license key to activate on your account.`
+    `Access requires a <b>license key</b> from the operator. Tap <b>Enter license key</b> and send yours — ` +
+    `it will only work on the Telegram account it was assigned to.`
   )
 }
 
@@ -115,22 +101,20 @@ function mainMenuKeyboard(user: TgUser, access: ReturnType<typeof findAccessLice
   if (access) {
     const rows: InlineKeyboard = [
       [{ text: '🛡 Spoof media', callback_data: 'spoof_help' }],
-      [{ text: '📊 My subscription', callback_data: 'sub_info' }]
+      [{ text: '📊 My license', callback_data: 'sub_info' }]
     ]
     if (access.role === 'owner') rows.push([{ text: '👥 Manage admins', callback_data: 'admins' }])
-    // Bulk web upload — owner only (the link carries the license key). Requires
+    // Bulk web upload — mints a temporary link on tap (valid ~30 min). Requires
     // web intake enabled and a hosted upload page URL configured in Settings.
     const cfg = getConfig()
-    if (access.role === 'owner' && cfg.webIntakeEnabled && cfg.uploadPageUrl.trim()) {
-      const url = `${cfg.uploadPageUrl.trim()}#key=${encodeURIComponent(access.license.key)}`
-      rows.push([{ text: '🌐 Bulk upload (web)', url }])
+    if (cfg.webIntakeEnabled && cfg.uploadPageUrl.trim()) {
+      rows.push([{ text: '🌐 Bulk upload (web)', callback_data: 'bulk' }])
     }
     rows.push([{ text: '❔ Help', callback_data: 'help' }])
     return rows
   }
   return [
-    [{ text: `💳 Subscribe (${priceLabel()})`, callback_data: 'subscribe' }],
-    [{ text: '🔑 Activate license', callback_data: 'activate' }],
+    [{ text: '🔑 Enter license key', callback_data: 'activate' }],
     [{ text: '❔ Help', callback_data: 'help' }]
   ]
 }
@@ -148,167 +132,6 @@ function backRow(): InlineKeyboard[number] {
   return [{ text: '⬅️ Back to menu', callback_data: 'menu' }]
 }
 
-// ── Subscribe / payment ──────────────────────────────────────────────────────
-
-async function showCoinPicker(token: string, chatId: number, editId: number): Promise<void> {
-  const cfg = getConfig()
-  if (!cfg.nowPaymentsApiKey.trim()) {
-    await editMessage(
-      token,
-      chatId,
-      editId,
-      '⚠️ Payments are not configured yet. Please contact the operator.',
-      [backRow()]
-    )
-    return
-  }
-  const coinRows: InlineKeyboard = []
-  const coins = cfg.payCurrencies
-  for (let i = 0; i < coins.length; i += 2) {
-    const row = coins.slice(i, i + 2).map((c) => ({
-      text: c.toUpperCase(),
-      callback_data: `pay:${c}`
-    }))
-    coinRows.push(row)
-  }
-  coinRows.push(backRow())
-  await editMessage(
-    token,
-    chatId,
-    editId,
-    `💳 <b>Subscribe — ${priceLabel()}</b>\n\nChoose the crypto you want to pay with:`,
-    coinRows
-  )
-}
-
-async function startPayment(
-  token: string,
-  chatId: number,
-  user: TgUser,
-  payCurrency: string,
-  editId: number
-): Promise<void> {
-  const cfg = getConfig()
-  await editMessage(token, chatId, editId, `⏳ Creating your ${payCurrency.toUpperCase()} invoice…`)
-  try {
-    const orderId = `bugrette-${user.id}-${Date.now()}`
-    const payment = await createPayment({
-      priceUsd: cfg.priceUsd,
-      payCurrency,
-      orderId,
-      description: `${APP_NAME} — 1 month subscription`
-    })
-
-    // Pre-generate a license key bound to this payment; issued once it settles.
-    const license = createUnpaidLicense(String(payment.payment_id), payCurrency)
-
-    const pending: PendingPayment = {
-      paymentId: String(payment.payment_id),
-      telegramId: user.id,
-      username: user.username?.toLowerCase(),
-      payCurrency,
-      payAddress: payment.pay_address,
-      payAmount: payment.pay_amount,
-      priceUsd: cfg.priceUsd,
-      key: license.key,
-      status: payment.payment_status,
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    }
-    upsertPending(pending)
-
-    const text =
-      `💳 <b>Send exactly this payment</b>\n\n` +
-      `Amount (tap to copy):\n<code>${payment.pay_amount}</code> ${payCurrency.toUpperCase()}\n\n` +
-      `Address (tap to copy):\n<code>${escapeHtml(payment.pay_address)}</code>\n\n` +
-      `Price: $${cfg.priceUsd} • 1 month\n\n` +
-      `I'll detect the payment automatically and send your license key here. ` +
-      `You can also tap “Check status”.`
-    await editMessage(token, chatId, editId, text, [
-      [{ text: '🔄 Check status', callback_data: `check:${payment.payment_id}` }],
-      backRow()
-    ])
-  } catch (err) {
-    const msg =
-      err instanceof NowPaymentsError
-        ? err.message
-        : err instanceof Error
-          ? err.message
-          : 'Could not create the payment.'
-    await editMessage(token, chatId, editId, `❌ ${escapeHtml(msg)}`, [
-      [{ text: '🔁 Try again', callback_data: 'subscribe' }],
-      backRow()
-    ])
-  }
-}
-
-async function checkPayment(
-  token: string,
-  chatId: number,
-  paymentId: string,
-  editId: number
-): Promise<void> {
-  const pending = allPending().find((p) => p.paymentId === paymentId)
-  if (!pending) {
-    await editMessage(token, chatId, editId, 'This payment is no longer pending. Open the menu to continue.', [
-      backRow()
-    ])
-    return
-  }
-  try {
-    const status = await getPaymentStatus(paymentId)
-    pending.status = status.payment_status
-    pending.updatedAt = Date.now()
-    upsertPending(pending)
-
-    if (isPaid(status.payment_status)) {
-      await issueLicense(token, pending)
-      return
-    }
-    if (isDead(status.payment_status)) {
-      deletePending(paymentId)
-      await editMessage(token, chatId, editId, `${statusLabel(status.payment_status)}. Please start again.`, [
-        [{ text: '🔁 Try again', callback_data: 'subscribe' }],
-        backRow()
-      ])
-      return
-    }
-    const text =
-      `${statusLabel(status.payment_status)}\n\n` +
-      `Amount (tap to copy):\n<code>${pending.payAmount}</code> ${pending.payCurrency.toUpperCase()}\n\n` +
-      `Address (tap to copy):\n<code>${escapeHtml(pending.payAddress)}</code>`
-    await editMessage(token, chatId, editId, text, [
-      [{ text: '🔄 Check status', callback_data: `check:${paymentId}` }],
-      backRow()
-    ])
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Could not check payment status.'
-    await editMessage(token, chatId, editId, `❌ ${escapeHtml(msg)}`, [
-      [{ text: '🔄 Check status', callback_data: `check:${paymentId}` }],
-      backRow()
-    ])
-  }
-}
-
-/**
- * A payment settled: mark its license paid and DM the buyer their key with an
- * "Activate now" button. Called by both the manual check and the poller.
- */
-async function issueLicense(token: string, pending: PendingPayment): Promise<void> {
-  markLicensePaid(pending.key)
-  deletePending(pending.paymentId)
-
-  const cfg = getConfig()
-  const text =
-    `🎉 <b>Payment received — thank you!</b>\n\n` +
-    `Here is your ${APP_NAME} license key (${cfg.subscriptionDays} days):\n\n` +
-    `<code>${pending.key}</code>\n\n` +
-    `Tap the button below to activate it on this account, or send the key to the bot anytime with “Activate license”.`
-  await sendMessage(token, pending.telegramId, text, [
-    [{ text: '✅ Activate on my account', callback_data: `actkey:${pending.key}` }]
-  ])
-}
-
 // ── Activation ───────────────────────────────────────────────────────────────
 
 async function promptActivate(token: string, chatId: number, editId: number): Promise<void> {
@@ -317,7 +140,9 @@ async function promptActivate(token: string, chatId: number, editId: number): Pr
     token,
     chatId,
     editId,
-    '🔑 <b>Activate license</b>\n\nSend me your license key (looks like <code>BUGR-XXXX-XXXX-XXXX-XXXX</code>).',
+    '🔑 <b>Enter license key</b>\n\nSend me the license key the operator gave you ' +
+      '(looks like <code>BUGR-XXXX-XXXX-XXXX-XXXX</code>).\n\n' +
+      'It only works on the Telegram account it was assigned to.',
     [backRow()]
   )
 }
@@ -336,7 +161,7 @@ async function doActivate(
     const days = lic.expiresAt ? Math.ceil((lic.expiresAt - Date.now()) / (24 * 60 * 60 * 1000)) : 0
     const text =
       `✅ <b>License activated!</b>\n\n` +
-      `Your subscription is active for <b>${days} days</b>. ` +
+      `Your access is active for <b>${days} days</b>. ` +
       `Send me an image or video to spoof it, and use “Manage admins” to add up to ${getConfig().maxAdmins} teammates.`
     if (editId) await editMessage(token, chatId, editId, text, mainMenuKeyboard(user, findAccessLicense(user.id, user.username)))
     else await sendMessage(token, chatId, text, mainMenuKeyboard(user, findAccessLicense(user.id, user.username)))
@@ -347,7 +172,10 @@ async function doActivate(
     revoked: 'That license has been revoked.',
     expired: 'That license has expired.',
     'used-by-other': 'That key is already activated on another account.',
-    unpaid: 'That key has not been paid for yet.'
+    unpaid: 'That key is not ready to activate. Contact the operator.',
+    'wrong-user': 'That key is assigned to a different Telegram username. Contact the operator.',
+    'no-username':
+      'You need a Telegram @username to activate this key. Set one in Telegram → Settings → Username, then try again.'
   }
   const msg = reasons[result.reason] || 'Could not activate that key.'
   if (editId) await editMessage(token, chatId, editId, `❌ ${msg}`, [backRow()])
@@ -456,8 +284,8 @@ async function doRemoveAdmin(
 async function showSubInfo(token: string, chatId: number, user: TgUser, editId: number): Promise<void> {
   const access = findAccessLicense(user.id, user.username)
   if (!access) {
-    await editMessage(token, chatId, editId, 'You have no active subscription.', [
-      [{ text: `💳 Subscribe (${priceLabel()})`, callback_data: 'subscribe' }],
+    await editMessage(token, chatId, editId, 'You have no active license.', [
+      [{ text: '🔑 Enter license key', callback_data: 'activate' }],
       backRow()
     ])
     return
@@ -466,13 +294,46 @@ async function showSubInfo(token: string, chatId: number, user: TgUser, editId: 
   const days = lic.expiresAt ? Math.max(0, Math.ceil((lic.expiresAt - Date.now()) / (24 * 60 * 60 * 1000))) : 0
   const expiry = lic.expiresAt ? new Date(lic.expiresAt).toISOString().slice(0, 10) : 'unknown'
   const text =
-    `📊 <b>Your subscription</b>\n\n` +
+    `📊 <b>Your license</b>\n\n` +
     `Role: <b>${access.role}</b>\n` +
     `Status: <b>active</b>\n` +
     `Days left: <b>${days}</b>\n` +
-    `Renews/expires: <b>${expiry}</b>\n` +
+    `Expires: <b>${expiry}</b>\n` +
     (access.role === 'owner' ? `Admins: <b>${lic.admins.length}/${getConfig().maxAdmins}</b>` : '')
   await editMessage(token, chatId, editId, text, [backRow()])
+}
+
+// ── Bulk upload (temporary link) ─────────────────────────────────────────────
+
+async function showBulkLink(token: string, chatId: number, user: TgUser, editId: number): Promise<void> {
+  const cfg = getConfig()
+  if (!cfg.webIntakeEnabled || !cfg.uploadPageUrl.trim()) {
+    await editMessage(token, chatId, editId, '⚠️ Bulk upload is not enabled. Contact the operator.', [backRow()])
+    return
+  }
+  await editMessage(token, chatId, editId, '⏳ Creating your upload link…')
+  const uploadToken = await createUploadToken(user.id, 30)
+  if (!uploadToken) {
+    await editMessage(
+      token,
+      chatId,
+      editId,
+      '❌ Could not create an upload link right now. The database may be unreachable — try again shortly.',
+      [backRow()]
+    )
+    return
+  }
+  const url = `${cfg.uploadPageUrl.trim()}#t=${uploadToken}`
+  await editMessage(
+    token,
+    chatId,
+    editId,
+    '🌐 <b>Bulk upload</b>\n\n' +
+      'Open your private upload link below, drop your images/videos, and I\'ll spoof them. ' +
+      'The spoofed files come back here as download links.\n\n' +
+      '⏱ This link works for <b>30 minutes</b>, then it stops working.',
+    [[{ text: '📤 Open upload page', url }], backRow()]
+  )
 }
 
 // ── Help ─────────────────────────────────────────────────────────────────────
@@ -480,8 +341,8 @@ async function showSubInfo(token: string, chatId: number, user: TgUser, editId: 
 async function showHelp(token: string, chatId: number, editId: number): Promise<void> {
   const text =
     `❔ <b>How ${APP_NAME} works</b>\n\n` +
-    `1. Subscribe for ${priceLabel()} (crypto). You'll get a license key.\n` +
-    `2. Activate the key on your Telegram account.\n` +
+    `1. Get a license key from the operator (assigned to your Telegram @username).\n` +
+    `2. Tap “Enter license key” and send it — it activates on your account.\n` +
     `3. Send any image or video — I'll spoof it and send it back.\n` +
     `4. As the owner, add up to ${getConfig().maxAdmins} admins by @username so your team can use it too.\n\n` +
     `Spoofing strips metadata, rebuilds EXIF/container identity and perturbs pixels so exports don't share a fingerprint.`
@@ -532,11 +393,8 @@ async function handleMedia(token: string, chatId: number, user: TgUser, msg: TgM
     await sendMessage(
       token,
       chatId,
-      `🔒 You need an active subscription to spoof media.`,
-      [
-        [{ text: `💳 Subscribe (${priceLabel()})`, callback_data: 'subscribe' }],
-        [{ text: '🔑 Activate license', callback_data: 'activate' }]
-      ]
+      `🔒 You need an active license to spoof media.`,
+      [[{ text: '🔑 Enter license key', callback_data: 'activate' }]]
     )
     return
   }
@@ -638,11 +496,11 @@ async function handleCallback(token: string, cb: TgCallbackQuery): Promise<void>
 
   try {
     if (data === 'menu') return void (await showMainMenu(token, chatId, user, editId))
-    if (data === 'subscribe') return void (await showCoinPicker(token, chatId, editId))
     if (data === 'activate') return void (await promptActivate(token, chatId, editId))
     if (data === 'admins') return void (await showAdminMenu(token, chatId, user, editId))
     if (data === 'admin_add') return void (await promptAddAdmin(token, chatId, user, editId))
     if (data === 'sub_info') return void (await showSubInfo(token, chatId, user, editId))
+    if (data === 'bulk') return void (await showBulkLink(token, chatId, user, editId))
     if (data === 'help') return void (await showHelp(token, chatId, editId))
     if (data === 'spoof_help') {
       return void (await editMessage(
@@ -653,9 +511,6 @@ async function handleCallback(token: string, cb: TgCallbackQuery): Promise<void>
         [backRow()]
       ))
     }
-    if (data.startsWith('pay:')) return void (await startPayment(token, chatId, user, data.slice(4), editId))
-    if (data.startsWith('check:')) return void (await checkPayment(token, chatId, data.slice(6), editId))
-    if (data.startsWith('actkey:')) return void (await doActivate(token, chatId, user, data.slice(7), editId))
     if (data.startsWith('admin_rm:')) return void (await doRemoveAdmin(token, chatId, user, data.slice(9), editId))
   } catch (err) {
     console.warn('[bot] callback failed:', err instanceof Error ? err.message : err)
@@ -727,43 +582,4 @@ export function startBot(): void {
 export function restartBot(): void {
   preparedToken = ''
   setStatus({ state: 'idle', message: 'Reconnecting…' })
-}
-
-// ── Background payment poller ─────────────────────────────────────────────────
-
-let pollerStarted = false
-
-export function startPaymentPoller(): void {
-  if (pollerStarted) return
-  pollerStarted = true
-  void (async () => {
-    for (;;) {
-      await sleep(20000)
-      const cfg = getConfig()
-      if (!cfg.nowPaymentsApiKey.trim() || !cfg.botToken.trim()) continue
-      const token = cfg.botToken.trim()
-      for (const pending of allPending()) {
-        try {
-          const status = await getPaymentStatus(pending.paymentId)
-          if (status.payment_status === pending.status) continue
-          pending.status = status.payment_status
-          pending.updatedAt = Date.now()
-          upsertPending(pending)
-
-          if (isPaid(status.payment_status)) {
-            await issueLicense(token, pending)
-          } else if (isDead(status.payment_status)) {
-            deletePending(pending.paymentId)
-            await sendMessage(
-              token,
-              pending.telegramId,
-              `${statusLabel(status.payment_status)}. Your payment did not complete — please start again with /menu.`
-            ).catch(() => {})
-          }
-        } catch {
-          // Network hiccup or rate limit — try again next cycle.
-        }
-      }
-    }
-  })()
 }

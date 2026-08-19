@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import type { License } from '@shared/types'
 import { allLicenses, getConfig, mergeLicensesLocal, setLicenseSyncHooks } from './store'
@@ -43,6 +44,7 @@ interface LicenseRow {
   key: string
   status: string
   created_at: number
+  assigned_username: string | null
   activated_at: number | null
   expires_at: number | null
   owner_telegram_id: number | null
@@ -62,6 +64,7 @@ function toLicenseRow(l: License): LicenseRow {
     key: l.key,
     status: l.status,
     created_at: l.createdAt,
+    assigned_username: l.assignedUsername ?? null,
     activated_at: l.activatedAt ?? null,
     expires_at: l.expiresAt ?? null,
     owner_telegram_id: l.ownerTelegramId ?? null,
@@ -76,6 +79,7 @@ function fromRows(licenseRow: LicenseRow, adminRows: AdminRow[]): License {
     key: licenseRow.key,
     status: licenseRow.status as License['status'],
     createdAt: Number(licenseRow.created_at) || Date.now(),
+    assignedUsername: licenseRow.assigned_username ?? undefined,
     activatedAt: licenseRow.activated_at ?? undefined,
     expiresAt: licenseRow.expires_at ?? undefined,
     ownerTelegramId: licenseRow.owner_telegram_id ?? undefined,
@@ -185,4 +189,43 @@ export function isSupabaseConfigured(): boolean {
 /** Shared client for other main-process modules (e.g. the job worker). */
 export function getSupabaseClient(): SupabaseClient | null {
   return getClient()
+}
+
+/**
+ * Mint a temporary upload token (default 30 min) for the web bulk-upload page.
+ * Returns the token string, or null if Supabase isn't configured / the insert
+ * failed. Uses the service_role client, so it bypasses RLS.
+ */
+export async function createUploadToken(
+  telegramId: number,
+  ttlMinutes = 30
+): Promise<string | null> {
+  const c = getClient()
+  if (!c) return null
+  const token = randomUUID()
+  const now = Date.now()
+  const { error } = await c.from('upload_tokens').insert({
+    token,
+    telegram_id: telegramId,
+    created_at: now,
+    expires_at: now + ttlMinutes * 60 * 1000
+  })
+  if (error) {
+    console.warn('[supabase] createUploadToken failed:', error.message)
+    return null
+  }
+  return token
+}
+
+/** Look up which Telegram user requested a given upload token (for DM delivery). */
+export async function getTokenTelegramId(token: string): Promise<number | null> {
+  const c = getClient()
+  if (!c || !token) return null
+  const { data, error } = await c
+    .from('upload_tokens')
+    .select('telegram_id')
+    .eq('token', token)
+    .maybeSingle()
+  if (error || !data) return null
+  return (data as { telegram_id: number | null }).telegram_id ?? null
 }

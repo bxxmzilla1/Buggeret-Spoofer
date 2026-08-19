@@ -21,55 +21,41 @@ export function generateLicenseKey(): string {
   return key
 }
 
-/** Create an unpaid license shell (used when a payment is initiated). */
-export function createUnpaidLicense(paymentId?: string, payCurrency?: string): License {
+/**
+ * Create a license reserved for a specific Telegram @username. Only a user
+ * whose username matches can activate it. This is the sole way licenses are
+ * issued now (the crypto payment flow has been removed).
+ */
+export function createAssignedLicense(rawUsername: string): License {
+  const username = normalizeUsername(rawUsername)
   const license: License = {
     key: generateLicenseKey(),
-    status: 'unpaid',
+    status: 'assigned',
     createdAt: Date.now(),
-    admins: [],
-    paymentId,
-    payCurrency
+    assignedUsername: username,
+    admins: []
   }
   upsertLicense(license)
   return license
-}
-
-/** Create a license that is already paid and ready to activate. */
-export function createPaidLicense(opts?: { paymentId?: string; payCurrency?: string; days?: number }): License {
-  const license: License = {
-    key: generateLicenseKey(),
-    status: 'paid',
-    createdAt: Date.now(),
-    admins: [],
-    paymentId: opts?.paymentId,
-    payCurrency: opts?.payCurrency
-  }
-  upsertLicense(license)
-  return license
-}
-
-/** Mark a previously-unpaid license as paid (payment confirmed). */
-export function markLicensePaid(key: string): License | null {
-  const license = getLicense(key)
-  if (!license) return null
-  const updated: License = { ...license, status: license.status === 'unpaid' ? 'paid' : license.status }
-  upsertLicense(updated)
-  return updated
 }
 
 export type ActivateResult =
   | { ok: true; license: License }
-  | { ok: false; reason: 'not-found' | 'revoked' | 'expired' | 'used-by-other' | 'unpaid' }
+  | {
+      ok: false
+      reason: 'not-found' | 'revoked' | 'expired' | 'used-by-other' | 'unpaid' | 'wrong-user' | 'no-username'
+    }
 
 /**
- * Bind a paid license to a Telegram account, starting the subscription clock.
+ * Bind an assigned license to the Telegram account that claims it. Succeeds
+ * only when the caller's @username matches the license's `assignedUsername`.
  * Idempotent for the same owner (re-sending the key just returns the license).
  */
 export function activateLicense(key: string, telegramId: number, username?: string): ActivateResult {
   const license = getLicense(key.trim().toUpperCase())
   if (!license) return { ok: false, reason: 'not-found' }
   if (license.status === 'revoked') return { ok: false, reason: 'revoked' }
+  if (license.status === 'expired') return { ok: false, reason: 'expired' }
   if (license.status === 'unpaid') return { ok: false, reason: 'unpaid' }
 
   // Already activated?
@@ -78,13 +64,24 @@ export function activateLicense(key: string, telegramId: number, username?: stri
     return { ok: false, reason: 'used-by-other' }
   }
 
+  // Enforce the username assignment. Fail closed: an assigned key with no
+  // recorded username (should not happen) is rejected rather than opened up.
+  const caller = (username || '').toLowerCase()
+  const assigned = (license.assignedUsername || '').toLowerCase()
+  if (assigned) {
+    if (!caller) return { ok: false, reason: 'no-username' }
+    if (caller !== assigned) return { ok: false, reason: 'wrong-user' }
+  } else if (license.status === 'assigned') {
+    return { ok: false, reason: 'wrong-user' }
+  }
+
   const days = getConfig().subscriptionDays
   const now = Date.now()
   const activated: License = {
     ...license,
     status: 'active',
     ownerTelegramId: telegramId,
-    ownerUsername: (username || '').toLowerCase() || undefined,
+    ownerUsername: caller || undefined,
     activatedAt: now,
     expiresAt: now + days * 24 * 60 * 60 * 1000
   }

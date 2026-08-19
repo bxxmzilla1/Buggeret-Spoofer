@@ -196,6 +196,28 @@ body {
 .card-head h2 {
   margin: 0;
 }
+.gen-license {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.gen-license .at {
+  color: var(--muted);
+  font-size: 14px;
+}
+.gen-license .user-input {
+  width: 180px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+.gen-license .user-input:focus {
+  border-color: var(--accent);
+}
 
 .field {
   margin-bottom: 14px;
@@ -360,6 +382,9 @@ button.ghost:hover {
 }
 .status.paid {
   color: var(--accent-2);
+}
+.status.assigned {
+  color: var(--accent);
 }
 .status.expired,
 .status.revoked {

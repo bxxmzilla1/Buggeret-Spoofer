@@ -100,8 +100,7 @@
       </div>
 
       <div class="card">
-        <label for="key">License key</label>
-        <input id="key" type="text" placeholder="BUGR-XXXX-XXXX-XXXX" autocomplete="off" />
+        <div id="linkstate" class="msg">Checking your link…</div>
 
         <div id="drop" class="drop">
           <div class="big">📁 Drop files here or click to browse</div>
@@ -137,19 +136,42 @@
       const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 
       const $ = (id) => document.getElementById(id)
-      const keyInput = $('key')
       const drop = $('drop')
       const picker = $('picker')
       const filesEl = $('files')
       const goBtn = $('go')
       const msg = $('msg')
+      const linkState = $('linkstate')
       $('limit').textContent = `Images & videos · up to ${MAX_UPLOAD_MB} MB each`
 
-      // Prefill the license key from the bot link (#key=...).
-      const hashKey = new URLSearchParams(location.hash.slice(1)).get('key')
-      if (hashKey) keyInput.value = hashKey
+      // The temporary upload token comes from the bot link (#t=...).
+      const uploadToken = new URLSearchParams(location.hash.slice(1)).get('t')
 
       let chosen = []
+      let tokenOk = false
+
+      // Validate the temporary link on load.
+      ;(async () => {
+        if (!uploadToken) {
+          linkState.className = 'msg err'
+          linkState.textContent = 'Missing upload link. Open “Bulk upload” in the bot to get a fresh one.'
+          return
+        }
+        const { data: valid, error } = await supabase.rpc('is_upload_token_valid', { t: uploadToken })
+        if (error) {
+          linkState.className = 'msg err'
+          linkState.textContent = 'Could not reach the server. Refresh and try again.'
+          return
+        }
+        if (!valid) {
+          linkState.className = 'msg err'
+          linkState.textContent = 'This link has expired. Open “Bulk upload” in the bot to get a new one.'
+          return
+        }
+        tokenOk = true
+        linkState.className = 'msg ok'
+        linkState.textContent = '✅ Link active. Drop your files below — valid for 30 minutes.'
+      })()
 
       function fmtSize(n) {
         if (n > 1e9) return (n / 1e9).toFixed(1) + ' GB'
@@ -207,23 +229,11 @@
       goBtn.addEventListener('click', submit)
 
       async function submit() {
-        const key = keyInput.value.trim()
-        if (!key) return setMsg('Enter your license key first.', 'err')
+        if (!uploadToken || !tokenOk) return setMsg('Your upload link is missing or expired. Get a new one from the bot.', 'err')
         if (!chosen.length) return setMsg('Add at least one file.', 'err')
 
         goBtn.disabled = true
-        setMsg('Checking your license…', '')
-
-        // Validate the license via the security-definer RPC (no table access).
-        const { data: active, error: rpcErr } = await supabase.rpc('is_license_active', { k: key })
-        if (rpcErr) {
-          goBtn.disabled = false
-          return setMsg('Could not reach the server. Try again.', 'err')
-        }
-        if (!active) {
-          goBtn.disabled = false
-          return setMsg('That license key is not active. Check it and try again.', 'err')
-        }
+        setMsg('Uploading…', '')
 
         const jobId = crypto.randomUUID()
 
@@ -246,11 +256,11 @@
           st.className = 'state ok'
         }
 
-        // Create the job row (RLS enforces the license is active).
+        // Create the job row (RLS enforces the token is valid & unexpired).
         const now = Date.now()
         const { error: insErr } = await supabase.from('spoof_jobs').insert({
           job_id: jobId,
-          license_key: key,
+          upload_token: uploadToken,
           status: 'queued',
           total: chosen.length,
           completed: 0,

@@ -4,7 +4,7 @@ import os from 'node:os'
 import { randomUUID } from 'node:crypto'
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { getConfig } from './store'
-import { getSupabaseClient, isSupabaseConfigured } from './supabase'
+import { getSupabaseClient, getTokenTelegramId, isSupabaseConfigured } from './supabase'
 import { spoofToFolder } from './spoofer'
 import { sendMessage } from './tg'
 
@@ -30,7 +30,8 @@ interface JobFile {
 
 interface JobRow {
   job_id: string
-  license_key: string
+  license_key: string | null
+  upload_token: string | null
   telegram_id: number | null
   status: 'queued' | 'processing' | 'done' | 'error'
   total: number
@@ -175,10 +176,16 @@ async function processJob(c: SupabaseClient, job: JobRow): Promise<void> {
   }
 }
 
-/** DM the requester (when the job came from the Telegram bot) with the links. */
+/** DM the requester (resolved from the upload token) with the download links. */
 async function notify(job: JobRow, files: JobFile[]): Promise<void> {
   const cfg = getConfig()
-  if (!job.telegram_id || !cfg.botToken.trim()) return
+  if (!cfg.botToken.trim()) return
+  // The temporary token records who requested the link; fall back to any
+  // telegram_id stored on the job (legacy jobs).
+  const chatId = job.upload_token
+    ? await getTokenTelegramId(job.upload_token)
+    : job.telegram_id
+  if (!chatId) return
   const links = files
     .filter((f) => f.downloadUrl)
     .map((f, i) => `${i + 1}. <a href="${f.downloadUrl}">${escapeHtml(f.outName || f.name)}</a>`)
@@ -186,7 +193,7 @@ async function notify(job: JobRow, files: JobFile[]): Promise<void> {
   const text = links
     ? `✅ Your bulk spoof job is ready (${files.filter((f) => f.status === 'done').length}/${files.length}):\n\n${links}\n\nLinks expire in ${cfg.jobRetentionHours}h.`
     : '❌ Your bulk spoof job failed to process any files.'
-  await sendMessage(cfg.botToken.trim(), job.telegram_id, text).catch(() => {})
+  await sendMessage(cfg.botToken.trim(), chatId, text).catch(() => {})
 }
 
 function escapeHtml(s: string): string {
@@ -209,6 +216,14 @@ async function cleanupExpired(c: SupabaseClient): Promise<void> {
     await removeAll(c, UPLOAD_BUCKET, (row.files || []).map((f) => `${row.job_id}/${f.name}`))
     await c.from('spoof_jobs').delete().eq('job_id', row.job_id)
   }
+
+  // Purge upload tokens well past their expiry (grace window lets in-flight
+  // jobs still resolve their requester for the DM).
+  await c
+    .from('upload_tokens')
+    .delete()
+    .lt('expires_at', now - 60 * 60 * 1000)
+    .then(undefined, () => {})
 }
 
 async function requeueStale(c: SupabaseClient): Promise<void> {

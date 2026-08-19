@@ -5,11 +5,12 @@
 -- Row Level Security is left enabled with no public policies (service_role
 -- bypasses RLS). Do NOT expose the service_role key in any client/browser.
 
--- Subscriptions / license owners ("users").
+-- Licenses (issued by the operator and assigned to a Telegram username).
 create table if not exists public.licenses (
   key               text primary key,
-  status            text not null default 'unpaid',
+  status            text not null default 'assigned',
   created_at        bigint not null,
+  assigned_username text,
   activated_at      bigint,
   expires_at        bigint,
   owner_telegram_id bigint,
@@ -17,6 +18,9 @@ create table if not exists public.licenses (
   payment_id        text,
   pay_currency      text
 );
+
+-- Migration for projects created before username-assigned licenses existed.
+alter table public.licenses add column if not exists assigned_username text;
 
 -- Authorised admins (up to 5 per license).
 create table if not exists public.admins (
@@ -59,57 +63,74 @@ create or replace view public.access_users as
 -- ───────────────────────────────────────────────────────────────────────────
 -- Web bulk-upload pipeline (Architecture A: Supabase Storage as the broker).
 --
--- Remote users open a static web page, drop many files, and enter their license
--- key. The page uploads the raw files to the `spoof-uploads` bucket and inserts
--- a `spoof_jobs` row (status = 'queued'). The 24/7 desktop app (service_role)
--- claims the job, spoofs each file, uploads results to `spoof-outputs`, writes
--- time-limited signed download URLs onto the job row, deletes the inputs, and
--- deletes everything once `expires_at` passes (auto-cleanup to save storage).
+-- Access is granted by a TEMPORARY UPLOAD TOKEN (not a license key). A user with
+-- bot access taps "Bulk upload"; the desktop app mints a token that is valid for
+-- ~30 minutes and hands back a link containing it. The web page uploads files to
+-- the `spoof-uploads` bucket and inserts a `spoof_jobs` row referencing the
+-- token. The 24/7 desktop app (service_role) claims the job, spoofs each file,
+-- uploads results to `spoof-outputs`, writes time-limited signed download URLs
+-- onto the job row, DMs them to the requester, deletes the inputs, and deletes
+-- everything once `expires_at` passes. Expired tokens can no longer create jobs.
 -- ───────────────────────────────────────────────────────────────────────────
 
-create table if not exists public.spoof_jobs (
-  job_id      uuid primary key,
-  license_key text not null,
-  telegram_id bigint,
-  status      text not null default 'queued', -- queued | processing | done | error
-  total       int  not null default 0,
-  completed   int  not null default 0,
-  files       jsonb not null default '[]'::jsonb,
-  error       text,
+-- Short-lived upload links. Minted by the desktop app (service_role).
+create table if not exists public.upload_tokens (
+  token       uuid primary key,
+  telegram_id bigint,           -- who requested it (for DM delivery of results)
   created_at  bigint not null,
-  updated_at  bigint not null,
-  expires_at  bigint
+  expires_at  bigint not null   -- token is unusable after this (≈ now + 30 min)
 );
+create index if not exists upload_tokens_expires_idx on public.upload_tokens (expires_at);
+alter table public.upload_tokens enable row level security; -- no anon policies: service_role only
+
+create table if not exists public.spoof_jobs (
+  job_id       uuid primary key,
+  license_key  text,            -- legacy; unused by the token flow
+  upload_token uuid,            -- the temporary link that authorised this job
+  telegram_id  bigint,
+  status       text not null default 'queued', -- queued | processing | done | error
+  total        int  not null default 0,
+  completed    int  not null default 0,
+  files        jsonb not null default '[]'::jsonb,
+  error        text,
+  created_at   bigint not null,
+  updated_at   bigint not null,
+  expires_at   bigint
+);
+
+-- Migration for projects created under the older license-gated flow.
+alter table public.spoof_jobs add column if not exists upload_token uuid;
+alter table public.spoof_jobs alter column license_key drop not null;
 
 create index if not exists spoof_jobs_status_idx  on public.spoof_jobs (status, created_at);
 create index if not exists spoof_jobs_expires_idx on public.spoof_jobs (expires_at);
 
 alter table public.spoof_jobs enable row level security;
 
--- Security-definer check the browser can call WITHOUT reading the licenses table.
--- Returns true only for an active license key.
-create or replace function public.is_license_active(k text)
+-- Security-definer check the browser can call to see whether a token is still
+-- valid, WITHOUT being able to read the upload_tokens table directly.
+create or replace function public.is_upload_token_valid(t uuid)
   returns boolean
   language sql
   security definer
   set search_path = public
 as $$
   select exists (
-    select 1 from public.licenses
-    where key = k and status = 'active'
+    select 1 from public.upload_tokens
+    where token = t and expires_at > (extract(epoch from now()) * 1000)
   );
 $$;
 
-revoke all on function public.is_license_active(text) from public;
-grant execute on function public.is_license_active(text) to anon;
+revoke all on function public.is_upload_token_valid(uuid) from public;
+grant execute on function public.is_upload_token_valid(uuid) to anon;
 
 -- Anonymous browsers may:
---   • INSERT a job only for an active license, and only as 'queued';
---   • SELECT job progress (but NOT the license_key column — see column grant).
+--   • INSERT a job only against a valid (unexpired) token, and only as 'queued';
+--   • SELECT job progress (limited columns — no tokens/ids are exposed).
 drop policy if exists "anon create job" on public.spoof_jobs;
 create policy "anon create job"
   on public.spoof_jobs for insert to anon
-  with check (public.is_license_active(license_key) and status = 'queued');
+  with check (public.is_upload_token_valid(upload_token) and status = 'queued');
 
 drop policy if exists "anon read jobs" on public.spoof_jobs;
 create policy "anon read jobs"
@@ -117,8 +138,7 @@ create policy "anon read jobs"
   using (true);
 
 -- PostgREST needs table privileges in addition to the RLS policies above.
--- Note the license_key column is intentionally omitted from the SELECT grant so
--- it can never be read back by the anon (browser) role.
+-- Only progress columns are readable by anon; tokens and ids are never exposed.
 grant insert on public.spoof_jobs to anon;
 grant select (job_id, status, total, completed, files, error, created_at, expires_at)
   on public.spoof_jobs to anon;
